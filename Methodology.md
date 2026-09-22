@@ -61,7 +61,7 @@ For the current output, the selected preprocessing and estimator were refitted o
 A single dwelling category was sampled independently from each vector, rather than selected by its maximum probability:
 
 $$
-Y_i\mid p_i\sim\operatorname{Categorical}(p_{i1},p_{i2},p_{i3},p_{i4}).
+Y_i\mid p_i\sim\text{Categorical}(p_{i1},p_{i2},p_{i3},p_{i4}).
 $$
 
 The EOD rows were sorted by `folio_vivienda` and sampled with NumPy seed 2026 for reproducibility. The sampled `muestreo_tipo_vivienda` is therefore one possible realization, not an observed dwelling type or a certainty claim. The complete probability vector is preserved as JSON in `probabilidad_tipo_vivienda`; `fuente_tipo_vivienda` identifies the model-and-sampling source.
