@@ -112,7 +112,7 @@ The implementation fixes one shift as a reference and solves the remaining momen
 Finally, we draw one category from each calibrated vector with a fixed random seed:
 
 $$
-Y_i\mid\tilde p_i\sim\operatorname{Categorical}(\tilde p_{i1},\ldots,\tilde p_{i4}).
+Y_i\mid\tilde p_i\sim\text{Categorical}(\tilde p_{i1},\ldots,\tilde p_{i4}).
 $$
 
 The calibrated probabilities reproduce the estimated AGEB proportions in expectation under the EOD weights. Independent draws need not reproduce them exactly in the realized sample, especially in AGEBs with few EOD dwellings. The final dwelling-level CSV keeps the identifier, AGEB, EOD weight, original and calibrated probability dictionaries, and both the original and calibrated sampled categories. The notebooks also save the comparison figures. These outputs remain estimates: differences between the 2020 Census and 2023 EOD, uncertainty in the donor-derived AGEB targets, and weak separation of uncommon dwelling types are not removed by matching the spatial constraints.
