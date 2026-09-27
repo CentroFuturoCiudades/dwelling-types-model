@@ -1,98 +1,118 @@
 # Methodology
 
-*Working draft — initial results are under review. The Census holdout evaluation is promising for probability estimation, but it does not verify dwelling types for individual EOD records.*
+The EOD records where people travel from and to, but it does not identify the physical type of their dwelling. We estimate that attribute in four categories. The procedure first learns dwelling-level probabilities from the 2020 Census Expanded Questionnaire and then adjusts those probabilities to a Census-derived dwelling-type distribution for each AGEB. The assigned type is a draw from the adjusted probabilities, not an observed EOD response.
 
-## Study objective and data
+## 1. Harmonize the Census and EOD dwelling data
 
-This project estimates a four-category dwelling type for each dwelling in the 2023 Guadalajara Metropolitan Area Origin–Destination Survey (EOD). The EOD does not record that outcome directly. Supervised information comes from the 2020 Population and Housing Census Expanded Questionnaire for nine Jalisco municipalities: Guadalajara, Ixtlahuacán de los Membrillos, Juanacatlán, El Salto, Tlajomulco, Tlaquepaque, Tonalá, Zapopan, and Zapotlanejo. The analysis unit is a dwelling in both sources. The EOD and Census inputs were loaded with `eodgdl` and `mxcensus`, respectively; no person-level attributes were joined into the model.
+We work at the dwelling level in both sources: the 2020 Population and Housing Census Expanded Questionnaire and the 2023 Guadalajara Metropolitan Area Origin–Destination Survey (EOD). The analysis covers the nine municipalities selected in the notebooks. The first notebook loads the source tables, retains the fields needed for this analysis, preserves each source's dwelling identifier and expansion factor, and constructs the observed Census outcome. The second notebook completes the recoding of predictors shared by the two surveys.
 
-The source-selection notebook produced 39,238 Census dwellings and 17,901 EOD dwellings. Census `ID_VIV` was retained as `id_vivienda_censo`; EOD `folio_vivienda` identifies each EOD dwelling. The Census `FACTOR` was retained as `factor_expansion` and the EOD survey weight as `ponderador`. These weights are source-specific and are not interchanged.
+The Census variable CLAVIVP distinguishes detailed forms of private dwelling. We group codes 1–9 into four categories that can be used throughout the analysis:
 
-## Outcome definition
+| Analysis category | CLAVIVP codes | Included dwelling forms |
+|---|---:|---|
+| casa_unica | 1 | House unique to its lot |
+| casa_compartida_duplex | 2, 3 | House sharing a lot or duplex |
+| departamento | 4 | Apartment in a building |
+| otra_vivienda | 5–9 | Other specified private dwelling forms |
 
-The Census `CLAVIVP` field was mapped into the analysis outcome `dwelling_type`:
+Code 99 is an unspecified type. We leave it without a target label and exclude it from supervised fitting; it is not a fifth physical category. Grouping the detailed codes makes the outcome usable across the workflow, but it also means that we do not recover the distinctions inside the combined categories.
 
-| `dwelling_type` | `clavivp_codigo` | Interpretation |
-|---|---|---|
-| `casa_unica` | 1 | House unique to its lot |
-| `casa_compartida_duplex` | 2, 3 | House sharing a lot or duplex |
-| `departamento` | 4 | Apartment in a building |
-| `otra_vivienda` | 5–9 | Other specified private dwelling forms |
+The individual model uses seven predictors with corresponding meanings in both surveys: municipality, persons in the dwelling, tenure, access to a car or pickup truck, motorcycle, bicycle, and internet. We map municipalities to the same labels, cap Census household size at 10 to match the EOD's “10 or more” response, align tenure categories, and convert vehicle availability and internet access to yes/no indicators. We do not use income because the available Census work-income and EOD household-income measures are not equivalent. AGEB identifies where an EOD dwelling belongs for the later spatial steps; it is not a supervised predictor. Person-level attributes, identifiers, survey weights, and UPM are also excluded from the predictor matrix.
 
-Code 99 denotes an unspecified dwelling type, not a fifth physical category. The 44 records carrying that unknown outcome were excluded from model fitting and evaluation, leaving 39,194 labeled Census dwellings. The grouping reduces the sparsity of individual `CLAVIVP` codes but also removes distinctions within the combined categories. Code 6 was not observed in the selected Census records, although it remains in the defined mapping.
+The Census expansion factor and the EOD ponderador serve different purposes. The first weights Census model fitting and evaluation; the second weights EOD summaries and spatial calibration. Neither is used as a predictor.
 
-Among labeled Census dwellings, the `factor_expansion`-weighted outcome proportions were 74.3400% `casa_unica`, 13.5087% `casa_compartida_duplex`, 11.3250% `departamento`, and 0.8263% `otra_vivienda`.
+## 2. Train and apply the individual probability model
 
-## Predictor harmonization
+We split labeled Census dwellings with StratifiedGroupKFold. Stratification approximately preserves the four-category outcome mix, while grouping keeps every UPM entirely within one partition. Four of five outer folds form the training and model-selection set; the fifth is left untouched for final evaluation. Within the training set, a second five-fold grouped split generates out-of-fold probabilities for every candidate under the same partitions.
 
-Seven dwelling-level predictors were used in both sources: `municipio`, `personas_en_vivienda`, `tenencia_vivienda`, `tiene_auto_camioneta`, `tiene_moto`, `tiene_bicicleta`, and `tiene_internet`. Municipalities were mapped to the same nine Spanish `snake_case` labels. Household size was numeric and capped at 10 in the Census; the EOD response `10 y +` was assigned 10. Tenure was mapped to `propia`, `hipotecada`, `rentada`, `prestada`, or `otra`. For owner-occupied Census dwellings, `deuda` separated fully paid ownership from mortgages or stopped payments; `Blanco por pase` for this owner-debt question was interpreted as `propia` by the implemented mapping. Vehicle ownership and Internet access were mapped to `si` and `no`; positive EOD vehicle counts indicated `si`.
+The candidates include a weighted prior-only reference, multinomial logistic regression, histogram gradient boosting, and random forest. Missing categorical values are imputed from the most frequent value in the current training fold; missing household size is imputed from that fold's median. Categorical predictors are one-hot encoded. We refit this preprocessing inside every training partition so validation records do not inform their own preprocessing.
 
-The first notebook selected source fields and built the Census outcome; the second notebook performed the shared-predictor recoding. Thus the two saved “harmonized” input CSVs preserve selected source-coded predictors rather than the final model-ready recodings. Missing predictor values were handled within each model fit: the most frequent training value for categorical fields and the training median for household size. Categorical fields were one-hot encoded, with unseen categories ignored. This preprocessing was refitted separately within each cross-validation training partition.
-
-Income was excluded because the available Census work-income and EOD household-income measures are not equivalent. `ageb`, `centralidad`, and parking were not shared supervised predictors; the first two were retained only as EOD output descriptors. Neither source weight, `upm`, dwelling identifier, nor target-provenance field entered the predictor matrix.
-
-## Model development and evaluation
-
-With random seed 2026, an outer `StratifiedGroupKFold` divided the labeled Census sample into five folds, approximately stratifying `dwelling_type` while keeping each `upm` entirely in one fold. Folds 1–4 formed the training and selection set (31,368 records across 150 `upm` groups); fold 5 was held out for a single final comparison (7,826 records across 36 groups). Approximate stratification does not guarantee identical `factor_expansion`-weighted outcome proportions across these sets.
-
-Within the training and selection set, a separate five-fold `StratifiedGroupKFold` supplied pooled out-of-fold probabilities for every candidate. Identical grouped partitions were used across candidates. `factor_expansion` was passed as `sample_weight` for fitted estimators and for the evaluation metric; it was never a predictor. No class reweighting or resampling was used. The comparison comprised a weighted prior-only reference, multinomial logistic regression (`C` = 0.1, 1, or 10), histogram gradient boosting (`learning_rate` = 0.05 or 0.1; `max_leaf_nodes` = 7 or 15; `min_samples_leaf` = 20 or 50), and random forest (`n_estimators` = 400; `max_depth` = 10 or 15; `min_samples_leaf` = 20 or 50). The remaining estimator settings are recorded in the notebook.
-
-Model selection minimized pooled, `factor_expansion`-weighted multiclass log loss among candidates that improved on the weighted prior-only reference. For observed class $y_i$, its predicted probability $p_{i,y_i}$, and expansion factor $w_i$, the score was
+We compare complete probability vectors using expansion-factor-weighted multiclass log loss. If $y_i$ is the observed Census category, $p_{i,y_i}$ is the probability assigned to it, and $d_i$ is its Census expansion factor, the score is
 
 $$
-L=-\frac{\sum_i w_i\log p_{i,y_i}}{\sum_i w_i}.
+L=-\frac{\sum_i d_i\log p_{i,y_i}}{\sum_i d_i}.
 $$
 
-Lower log loss indicates better probability assigned to observed outcomes. Balanced accuracy was reported on the held-out set as a secondary diagnostic of hard, maximum-probability classification; it did not determine model selection.
+The selected candidate must improve on the weighted prior-only reference and have the lowest pooled out-of-fold log loss among eligible candidates. We also report weighted balanced accuracy for the category with the largest predicted probability, but that hard-classification measure does not select the probability model. The locked candidate is fitted on the outer training set and compared once with the reference on the untouched outer test set.
 
-The internal cross-validation reference log loss was 0.782473. The lowest eligible candidate achieved 0.709591: histogram gradient boosting with `learning_rate=0.05`, `max_leaf_nodes=7`, `min_samples_leaf=50`, `l2_regularization=1.0`, `max_iter=200`, and `random_state=2026`. This configuration was fitted on the complete training and selection set before the held-out comparison.
+After this comparison, we refit the selected preprocessing and estimator on all labeled Census dwellings. Its direct probability output gives each EOD dwelling a vector $p_i=(p_{i1},\ldots,p_{i4})$ in the fixed category order. No AGEB information or spatial quota enters this supervised model. An initial seeded categorical draw from $p_i$ is retained so we can compare the individual-only and spatially adjusted versions.
 
-| Held-out procedure | Weighted log loss ↓ | Weighted balanced accuracy ↑ |
-|---|---:|---:|
-| Weighted prior-only reference | 0.760589 | 0.250000 |
-| Selected histogram gradient boosting | 0.679022 | 0.261994 |
+## 3. Estimate the AGEB dwelling-type proportions
 
-This single held-out split supports an improvement in the model's probability score over a prior-only reference. The small balanced-accuracy gain also shows that maximum-probability classification remains weak for distinguishing all four categories. These results are preliminary and still under review. They do not measure accuracy after transfer to the EOD, where observed dwelling types are unavailable. No separate probability transformation was applied to the selected model's `predict_proba` output.
+The Census publishes AGEB counts for inhabited private dwellings and selected dwelling characteristics, but the workflow does not have an observed four-category dwelling-type count for every AGEB. We therefore estimate that mix rather than treating it as an official count.
 
-## EOD application and categorical sampling
+For the AGEBs present in the EOD, we load two distinct Census totals: $V_g$, all inhabited private dwellings in AGEB $g$, and $C_g$, dwellings covered by the reported characteristics. We also load candidate counts for bedrooms, rooms, vehicles, bicycles, and internet access. From these, the calibration actually uses up to eight controls: $C_g$, dwellings with one bedroom, dwellings with one room, dwellings with two rooms, and dwellings with a car or pickup truck, motorcycle, bicycle, or internet. Other loaded Census fields do not enter the fit.
 
-For the current output, the selected preprocessing and estimator were refitted on all 39,194 labeled Census dwellings using `factor_expansion`. The fitted model then produced one four-element probability vector $p_i=(p_{i1},\ldots,p_{i4})$ for each of the 17,901 EOD dwellings. The model did not use `ponderador` when predicting; that weight was used only for EOD summaries. No spatial calibration, AGEB quota, or OpenStreetMap-derived variable was applied.
-
-A single dwelling category was sampled independently from each vector, rather than selected by its maximum probability:
+The donors are dwelling records from the Census Expanded Questionnaire in the same municipality as the target AGEB. A donor need not have been observed inside that AGEB. We retain the six detailed dwelling forms eligible for this calibration, map them to the four analysis categories, and construct an indicator vector $x_i$ matching the available AGEB controls. Let $d_i$ be donor $i$'s original Census expansion factor and $T_g$ the vector of usable control totals for AGEB $g$. We adjust the donor weights separately for each AGEB:
 
 $$
-Y_i\mid p_i\sim\text{Categorical}(p_{i1},p_{i2},p_{i3},p_{i4}).
+w^*_{gi}=d_i\exp(x_i^\top\lambda_g).
 $$
 
-The EOD rows were sorted by `folio_vivienda` and sampled with NumPy seed 2026 for reproducibility. The sampled `muestreo_tipo_vivienda` is therefore one possible realization, not an observed dwelling type or a certainty claim. The complete probability vector is preserved as JSON in `probabilidad_tipo_vivienda`; `fuente_tipo_vivienda` identifies the model-and-sampling source.
+The notebook finds the AGEB-specific parameters $\lambda_g$ by minimizing the dual objective
 
-## Descriptive distribution comparison
+$$
+F_g(\lambda_g)=\sum_i d_i\exp(x_i^\top\lambda_g)-T_g^\top\lambda_g,
+\qquad
+\nabla F_g(\lambda_g)=\sum_i w^*_{gi}x_i-T_g.
+$$
 
-The table compares (i) observed, expansion-weighted Census categories, (ii) `ponderador`-weighted mean EOD probabilities, and (iii) `ponderador`-weighted frequencies from this one EOD sample.
+This is the dual form of choosing weights close to their starting values under an entropy distance, subject to $\sum_i w^*_{gi}x_i=T_g$. A missing control is omitted for that AGEB. When a control is zero, donors whose corresponding indicator is one are given zero calibrated weight; the positive controls are fitted among the remaining eligible donors. The notebook compares fitted control totals with the Census totals to describe the numerical fit.
 
-| Category | Census observed | EOD expected | EOD sampled |
-|---|---:|---:|---:|
-| `casa_unica` | 74.3400% | 77.1005% | 77.1533% |
-| `casa_compartida_duplex` | 13.5087% | 12.4269% | 12.4375% |
-| `departamento` | 11.3250% | 9.8388% | 9.7424% |
-| `otra_vivienda` | 0.8263% | 0.6338% | 0.6668% |
+We sum the adjusted weights of donors in each category to estimate its AGEB count among dwellings with characteristics:
 
-The notebook also reports total variation distance, $D_{\mathrm{TV}}(p,q)=\tfrac12\sum_k|p_k-q_k|$, for Census versus expected EOD shares and for expected versus sampled EOD shares. The first is a descriptive difference between surveys from different years; the second quantifies sampling variation in this realization. Neither is an accuracy measure for EOD dwelling types. A transparent-background comparison figure is saved in PNG and PDF.
+$$
+\widehat C_{gk}=\sum_i w^*_{gi}\,\mathbf{1}(y_i=k).
+$$
 
-## Reproducibility and outputs
+The difference $R_g=\max(0,V_g-C_g)$ represents dwellings outside that characteristics base. The implemented method allocates this entire residual to otra_vivienda. Thus $\widehat N_{gk}=\widehat C_{gk}$ for the other three categories and $\widehat N_{g,\mathrm{otra}}=\widehat C_{g,\mathrm{otra}}+R_g$. This is a modeling assumption, not an observed count of other dwellings. The estimated proportions are $\widehat N_{gk}/V_g$ and are saved as the spatial input for the next notebook.
 
-The two notebooks are `notebooks/01_harmonizacion_datos.ipynb` and `notebooks/02_modelo_individual.ipynb`. Their principal outputs are:
+## 4. Calibrate EOD probabilities and draw dwelling types
 
-| File | Contents |
-|---|---|
-| `outputs/censo_viviendas_armonizado.csv` | Selected Census dwelling fields and grouped outcome |
-| `outputs/eod_viviendas_armonizado.csv` | Selected EOD dwelling fields |
-| `outputs/modelo_dwelling_type_individual.joblib` | Fitted pipeline, class order, predictor list, seed, and EOD mappings |
-| `outputs/eod_probabilidades_individuales.csv` | EOD identifiers/descriptors, probability JSON, sampled category, and source label |
-| `outputs/figures/distribucion_dwelling_type_censo_eod.png` and `.pdf` | Weighted distribution comparison |
+We align the four EOD probabilities with the four estimated AGEB proportions. Because small numerical differences can leave the estimated proportions slightly short of or above one, we divide each AGEB's four values by their sum. Call the resulting target $q_{gk}$. For comparison, we first calculate the original EOD mean within AGEB $g$, using its fixed EOD expansion weights $a_i$:
 
-The EOD result CSV has one row per `folio_vivienda` and the columns `folio_vivienda`, `ponderador`, `municipio`, `ageb`, `centralidad`, `probabilidad_tipo_vivienda`, `muestreo_tipo_vivienda`, and `fuente_tipo_vivienda`. The saved model is a Python joblib artifact and should be loaded only from a trusted source with a compatible software environment. The source-loading notebook records the `eodgdl`, `mxcensus`, and `pandas` versions used when its outputs were generated.
+$$
+r_{gk}=\frac{\sum_{i\in g}a_i p_{ik}}{\sum_{i\in g}a_i}.
+$$
 
-## Interpretation and remaining uncertainty
+The notebook summarizes the difference between $r_{gk}$ and $q_{gk}$ across AGEBs using the Census dwelling totals $V_g$:
 
-The EOD outcome is imputed from relationships learned in 2020 Census data, then sampled. Year-to-year change, differences in survey coverage and response, incomplete predictor equivalence, and weak separation of rare categories may affect transfer. `casa_compartida_duplex` combines two Census structures, while `otra_vivienda` combines several uncommon structures; the model does not recover distinctions inside those groups. The resulting probability vectors and categorical draw should be described as estimates, not directly observed housing types. Further review of source harmonization, held-out results, and output interpretation is pending before treating this as a finalized methodology.
+$$
+D_k=\frac{\sum_g V_g\lvert r_{gk}-q_{gk}\rvert}{\sum_g V_g}.
+$$
+
+Multiplying $D_k$ by 100 expresses it in percentage points. This compares the original probabilities with the estimated spatial targets; it does not compare them with observed EOD dwelling types.
+
+We then adjust each dwelling's probability vector as little as possible under a weighted relative-entropy criterion. With $\tilde p_{ik}$ denoting the adjusted probability, the problem is
+
+$$
+\min_{\tilde p}\sum_{i\in g}a_i\sum_k\tilde p_{ik}\log\!\left(\frac{\tilde p_{ik}}{p_{ik}}\right)
+$$
+
+subject to
+
+$$
+\sum_k\tilde p_{ik}=1
+\quad\text{for every dwelling }i,
+\qquad
+\frac{\sum_{i\in g}a_i\tilde p_{ik}}{\sum_{i\in g}a_i}=q_{gk}
+\quad\text{for every category }k.
+$$
+
+The EOD weights $a_i$ remain fixed. For categories with a positive target, the calibrated vector has a category-specific exponential shift followed by normalization within each dwelling:
+
+$$
+\tilde p_{ik}
+=\frac{p_{ik}\exp(\lambda_{gk})}
+{\sum_{\ell:q_{g\ell}>0}p_{i\ell}\exp(\lambda_{g\ell})}.
+$$
+
+The implementation fixes one shift as a reference and solves the remaining moment equations. A category with target zero is assigned zero probability in that AGEB. Such a zero follows the estimated donor-based target; it is not proof that the dwelling type is physically absent there. Recomputing $D_k$ after calibration checks whether the imposed AGEB constraints were met numerically. A near-zero value is expected by construction and is not independent validation of individual dwelling types.
+
+Finally, we draw one category from each calibrated vector with a fixed random seed:
+
+$$
+Y_i\mid\tilde p_i\sim\operatorname{Categorical}(\tilde p_{i1},\ldots,\tilde p_{i4}).
+$$
+
+The calibrated probabilities reproduce the estimated AGEB proportions in expectation under the EOD weights. Independent draws need not reproduce them exactly in the realized sample, especially in AGEBs with few EOD dwellings. The final dwelling-level CSV keeps the identifier, AGEB, EOD weight, original and calibrated probability dictionaries, and both the original and calibrated sampled categories. The notebooks also save the comparison figures. These outputs remain estimates: differences between the 2020 Census and 2023 EOD, uncertainty in the donor-derived AGEB targets, and weak separation of uncommon dwelling types are not removed by matching the spatial constraints.
